@@ -8,8 +8,6 @@ from datetime import date
 
         
 
-
-
 class RoomSchema(BaseModel):
     room_number: str
     room_type: str
@@ -31,6 +29,7 @@ class RoomList(BaseModel):
         
         
 class RoomUpdateSchema(BaseModel):
+    room_number: str
     room_type: Optional[str] = None
     amount: Optional[int] = None
     status: Optional[Literal["available", "booked", "maintenance", "reserved"]] = None
@@ -38,12 +37,3 @@ class RoomUpdateSchema(BaseModel):
     class Config:
         orm_mode = True
 
-
-class CheckInSchema(BaseModel):
-    room_number: str
-    guest_name: str
-    arrival_date: date
-    departure_date: date
-
-    class Config:
-        orm_mode = True

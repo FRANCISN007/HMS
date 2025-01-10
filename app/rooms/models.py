@@ -13,8 +13,6 @@ class Room(Base):
     amount = Column(Integer)
     status = Column(String(50))
 
-    # Establish relationship with reservations
-    reservations = relationship("Reservation", back_populates="room")
-    #check_in = relationship("Check_in", back_populates="room")
-    check_in = relationship("Check_in", back_populates="room", cascade="all, delete-orphan")
 
+# Relationship
+    bookings = relationship("Booking", back_populates="room")

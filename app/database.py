@@ -7,8 +7,8 @@ from sqlalchemy.orm import sessionmaker
 
 load_dotenv()
 
-#SQLALCHEMY_DATABASE_URL = os.environ.get('DB_URL')
-SQLALCHEMY_DATABASE_URL = "sqlite:///./hotel_db"
+SQLALCHEMY_DATABASE_URL = os.environ.get('DB_URL')
+#SQLALCHEMY_DATABASE_URL = "sqlite:///./hotel_db"
 
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
 

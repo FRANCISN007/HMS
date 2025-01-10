@@ -3,13 +3,19 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.users.auth import get_current_user
 from sqlalchemy.sql import func
-from sqlalchemy import or_
+from sqlalchemy import and_, or_, not_
 from app.rooms import schemas as room_schemas, models as room_models, crud
-from app.reservations import models as reservation_models
-from app.check_in_guest import models as check_in_guest_models  # Adjust path if needed
+from app.bookings import models as booking_models  # Adjust path if needed
 from app.users import schemas
+from datetime import date
+from loguru import logger
+
 router = APIRouter()
 
+
+
+# Set up logging
+logger.add("app.log", rotation="500 MB", level="DEBUG")
 
 @router.post("/")
 def create_room(
@@ -17,15 +23,38 @@ def create_room(
     db: Session = Depends(get_db),
     current_user: schemas.UserDisplaySchema = Depends(get_current_user),
 ):
+    logger.info(f"Room creation request received. User: {current_user.username}, Role: {current_user.role}")
+
+    # Check for admin permissions
     if current_user.role != "admin":
+        logger.warning(f"Permission denied for user {current_user.username}. Role: {current_user.role}")
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    existing_room = db.query(room_models.Room).filter(room_models.Room.room_number == room.room_number).first()
+    # Preserve the original case for storage but use lowercase for validation
+    original_room_number = room.room_number
+    normalized_room_number = original_room_number.lower()
+    logger.debug(f"Original room number: {original_room_number}, Normalized room number: {normalized_room_number}")
+
+    # Check if a room with the normalized room_number already exists
+    existing_room = (
+        db.query(room_models.Room)
+        .filter(func.lower(room_models.Room.room_number) == normalized_room_number)
+        .first()
+    )
     if existing_room:
+        logger.warning(f"Room creation failed. Room {original_room_number} already exists in the database.")
         raise HTTPException(status_code=400, detail="Room with this number already exists")
 
-    new_room = crud.create_room(db, room)
-    return {"message": "Room created successfully", "room": new_room}
+    logger.info(f"Creating a new room: {original_room_number}")
+
+    try:
+        # Create the room using the original case
+        new_room = crud.create_room(db, room)
+        logger.info(f"Room {original_room_number} created successfully.")
+        return {"message": "Room created successfully", "room": new_room}
+    except Exception as e:
+        logger.error(f"Error while creating room {original_room_number}: {str(e)}")
+        raise HTTPException(status_code=500, detail="An error occurred while creating the room.")
 
 
 @router.get("/", response_model=dict)
@@ -35,25 +64,13 @@ def list_rooms(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
     Also include the total number of rooms in the hotel.
     """
     # Fetch the list of rooms with pagination
-    rooms = (
-        db.query(room_models.Room.room_number, room_models.Room.room_type, room_models.Room.amount)
-        .offset(skip)
-        .limit(limit)
-        .all()
-    )
+    rooms = crud.get_rooms_with_pagination(skip=skip, limit=limit, db=db)
     
     # Convert SQLAlchemy rows to dictionaries
-    serialized_rooms = [
-        {
-            "room_number": room.room_number,
-            "room_type": room.room_type,
-            "amount": room.amount,
-        }
-        for room in rooms
-    ]
+    serialized_rooms = crud.serialize_rooms(rooms)
     
     # Get the total count of rooms
-    total_rooms = db.query(room_models.Room).count()
+    total_rooms = crud.get_total_room_count(db=db)
     
     # Return the response as a dictionary
     return {
@@ -62,151 +79,83 @@ def list_rooms(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/transactions", response_model=list[dict])
-def history(
-    db: Session = Depends(get_db),
-    current_user: schemas.UserDisplaySchema = Depends(get_current_user)
-            
-):
-    """
-    Lists all rooms along with their current and past transactions, including:
-    - Reservations
-    - Check-ins
-    - Current status (available, reserved, or checked-in)
-    """
-    # Query all rooms
-    all_rooms = db.query(room_models.Room).all()
-
-    # Query all reservations
-    reservations = db.query(
-        reservation_models.Reservation.room_number,
-        reservation_models.Reservation.guest_name,
-        reservation_models.Reservation.arrival_date,
-        reservation_models.Reservation.departure_date,
-        reservation_models.Reservation.status
-    ).all()
-
-    # Query all check-ins
-    check_ins = db.query(
-        check_in_guest_models.Check_in.room_number,
-        check_in_guest_models.Check_in.guest_name,
-        check_in_guest_models.Check_in.arrival_date,
-        check_in_guest_models.Check_in.departure_date,
-        check_in_guest_models.Check_in.status
-    ).all()
-
-    # Build a list of transactions for each room
-    transactions_map = {}
-
-    # Map reservations
-    for res in reservations:
-        if res.room_number not in transactions_map:
-            transactions_map[res.room_number] = []
-        transactions_map[res.room_number].append({
-            "transaction_type": "reservation",
-            "guest_name": res.guest_name,
-            "arrival_date": res.arrival_date,
-            "departure_date": res.departure_date,
-            "status": res.status
-        })
-
-    # Map check-ins
-    for check_in in check_ins:
-        if check_in.room_number not in transactions_map:
-            transactions_map[check_in.room_number] = []
-        transactions_map[check_in.room_number].append({
-            "transaction_type": "check-in",
-            "guest_name": check_in.guest_name,
-            "arrival_date": check_in.arrival_date,
-            "departure_date": check_in.departure_date,
-            "status": check_in.status
-        })
-
-    # Prepare the response with all room details and transactions
-    result = []
-    for room in all_rooms:
-        room_data = {
-            "room_number": room.room_number,
-            "room_type": room.room_type,
-            "amount": room.amount,
-            "current_status": room.status,
-            "transactions": transactions_map.get(room.room_number, [])
-        }
-        result.append(room_data)
-
-    return result
 
 
-from datetime import date
 
 @router.get("/available")
 def list_available_rooms(db: Session = Depends(get_db)):
-    """
-    List all available rooms. A room is available if it is not checked in for the current date, 
-    even if it is reserved for a future date.
-    """
     today = date.today()
 
-    # Get all room numbers currently checked in for today
-    checked_in_rooms_today = (
-        db.query(check_in_guest_models.Check_in.room_number)
-        .filter(
-            check_in_guest_models.Check_in.status == "checked-in",
-            check_in_guest_models.Check_in.arrival_date <= today,
-            check_in_guest_models.Check_in.departure_date >= today
+    # Query to get all rooms, no matter their availability status
+    available_rooms_query = db.query(room_models.Room)
+
+    # Exclude rooms with bookings that overlap with today
+    available_rooms_query = available_rooms_query.filter(
+        not_(
+            room_models.Room.room_number.in_(
+                db.query(booking_models.Booking.room_number)
+                .filter(
+                    booking_models.Booking.status.notin_(["checked-out", "cancelled"]),  # Exclude irrelevant bookings
+                    # Check for overlapping bookings with today
+                    and_(
+                        booking_models.Booking.arrival_date <= today,  # Booking starts before or on today
+                        booking_models.Booking.departure_date >= today,  # Booking ends after or on today
+                    )
+                )
+            )
         )
-        .distinct()
-        .all()
-    )
-    # Extract room numbers from the query result
-    checked_in_room_numbers = {room.room_number for room in checked_in_rooms_today}
-
-    # Query all rooms that are not checked in today
-    available_rooms = (
-        db.query(room_models.Room)
-        .filter(room_models.Room.room_number.not_in(checked_in_room_numbers))
-        .all()
     )
 
-    # Total number of rooms
+    # Fetch available rooms
+    available_rooms = available_rooms_query.all()
+
+    # Total rooms in the database
     total_rooms = db.query(room_models.Room).count()
 
-    # If no available rooms, display fully booked message
+    # If no rooms are available, return a fully booked message
     if not available_rooms:
         return {
-            "message": "We are fully booked! All rooms are currently occupied for today.",
+            "message": "We are fully booked! No rooms are available for today.",
             "total_rooms": total_rooms,
             "total_available_rooms": 0,
-            "available_rooms": []
+            "available_rooms": [],
         }
 
-    # Return the list of available rooms
+    # Serialize the available rooms for the response
+    serialized_rooms = [
+        {
+            "room_number": room.room_number,
+            "room_type": room.room_type,
+            "amount": room.amount,
+        }
+        for room in available_rooms
+    ]
+
     return {
+        "message": "Available rooms fetched successfully.",
         "total_rooms": total_rooms,
-        "total_available_rooms": len(available_rooms),
-        "available_rooms": [
-            {
-                "room_number": room.room_number,
-                "room_type": room.room_type,
-                "amount": room.amount,
-            }
-            for room in available_rooms
-        ]
+        "total_available_rooms": len(serialized_rooms),
+        "available_rooms": serialized_rooms,
     }
+
 
 
 
 @router.put("/{room_number}")
 def update_room(
     room_number: str,
-    room_update: schemas.RoomUpdateSchema,
+    room_update: room_schemas.RoomUpdateSchema,
     db: Session = Depends(get_db),
     current_user: schemas.UserDisplaySchema = Depends(get_current_user),
 ):
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    room = db.query(room_models.Room).filter(room_models.Room.room_number == room_number).first()
+    # Normalize the room_number input to lowercase
+    room_number = room_number.lower()
+
+    # Fetch the room by the normalized room_number
+    room = db.query(room_models.Room).filter(func.lower(room_models.Room.room_number) == room_number).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
 
@@ -217,7 +166,16 @@ def update_room(
             detail="Room cannot be updated as it is currently checked-in"
         )
 
-    # Update fields only if provided
+    # If a new room_number is provided, check for conflicts
+    if room_update.room_number and room_update.room_number.lower() != room.room_number.lower():
+        existing_room = db.query(room_models.Room).filter(
+            func.lower(room_models.Room.room_number) == room_update.room_number.lower()
+        ).first()
+        if existing_room:
+            raise HTTPException(status_code=400, detail="Room with this number already exists")
+        room.room_number = room_update.room_number.lower()  # Update the room number to lowercase
+
+    # Update other fields only if provided
     if room_update.room_type:
         room.room_type = room_update.room_type
 
@@ -225,10 +183,11 @@ def update_room(
         room.amount = room_update.amount
 
     if room_update.status:
-        if room_update.status not in ["available", "booked", "maintenance"]:
+        if room_update.status not in ["available", "booked", "maintenance", "reserved"]:
             raise HTTPException(status_code=400, detail="Invalid status value")
         room.status = room_update.status
 
+    # Commit the changes to the database
     db.commit()
     db.refresh(room)
 
@@ -242,51 +201,65 @@ def room_summary(
     current_user: schemas.UserDisplaySchema = Depends(get_current_user),
 ):
     """
-    Generate a summary of all rooms, including counts of checked-in, reserved, and available rooms.
-    Excludes cancelled reservations and counts availability based on current check-ins only.
+    Generate a summary of all rooms, including counts of:
+    - Checked-in rooms
+    - Reserved rooms (both today and future, counted separately)
+    - Available rooms for today
     """
-    from datetime import date
-
     today = date.today()
 
     try:
-        # Refresh session to ensure fresh data
-        db.commit()
-
         # Total number of rooms
         total_rooms = db.query(room_models.Room).count()
 
-        # Count rooms currently checked in for today
+        # Checked-in rooms today
         total_checked_in_rooms = (
-            db.query(check_in_guest_models.Check_in)
+            db.query(booking_models.Booking)
             .filter(
-                check_in_guest_models.Check_in.status == "checked-in",
-                check_in_guest_models.Check_in.arrival_date <= today,
-                check_in_guest_models.Check_in.departure_date >= today
+                booking_models.Booking.status == "checked-in",
+                booking_models.Booking.arrival_date <= today,
+                booking_models.Booking.departure_date >= today,
             )
-            .distinct(check_in_guest_models.Check_in.room_number)
             .count()
         )
 
-        # Count reserved rooms for future dates, excluding cancelled ones
+        # Reserved rooms (count reservations separately)
         total_reserved_rooms = (
-            db.query(reservation_models.Reservation)
+            db.query(booking_models.Booking)
             .filter(
-                reservation_models.Reservation.arrival_date > today,
-                reservation_models.Reservation.is_deleted == False  # Exclude cancelled reservations
+                booking_models.Booking.status == "reserved",
+                booking_models.Booking.arrival_date >= today,
             )
-            .distinct(reservation_models.Reservation.room_number)
             .count()
         )
 
-        # Calculate available rooms: Total rooms minus currently checked-in rooms
-        total_available_rooms = total_rooms - total_checked_in_rooms
+        # Occupied rooms today (checked-in + reserved for today)
+        occupied_rooms_today = (
+            db.query(booking_models.Booking.room_number)
+            .filter(
+                or_(
+                    booking_models.Booking.status == "checked-in",
+                    and_(
+                        booking_models.Booking.status == "reserved",
+                        booking_models.Booking.arrival_date <= today,
+                        booking_models.Booking.departure_date >= today,
+                    ),
+                )
+            )
+            .distinct()
+            .all()
+        )
+        occupied_room_numbers_today = {room.room_number for room in occupied_rooms_today}
+
+        # Total available rooms
+        total_available_rooms = total_rooms - len(occupied_room_numbers_today)
 
         # Determine the appropriate message
-        if total_checked_in_rooms == total_rooms:
-            message = "Fully booked!"  # All rooms are checked in
-        else:
-            message = f"{total_available_rooms} room(s) available."
+        message = (
+            f"{total_available_rooms} room(s) available."
+            if total_available_rooms > 0
+            else "Fully booked! All rooms are occupied for today."
+        )
 
         return {
             "total_rooms": total_rooms,
@@ -297,10 +270,12 @@ def room_summary(
         }
 
     except Exception as e:
+        logger.error(f"Error generating room summary: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"An error occurred while fetching room summary: {str(e)}"
+            detail=f"An error occurred while fetching room summary: {str(e)}",
         )
+
 
 
 @router.delete("/{room_number}")
@@ -313,16 +288,22 @@ def delete_room(
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    # Fetch the room by room_number
-    room = db.query(room_models.Room).filter(room_models.Room.room_number == room_number).first()
+    # Normalize the room_number input to lowercase
+    room_number = room_number.lower()
+
+    # Fetch the room by the normalized room_number
+    room = db.query(room_models.Room).filter(func.lower(room_models.Room.room_number) == room_number).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
 
-    # Prevent deletion of rooms with status 'checked-in' or 'reserved'
-    if room.status in ["checked-in", "reserved"]:
+    # Check if the room is tied to any bookings
+    bookings = db.query(booking_models.Booking).filter(
+        func.lower(booking_models.Booking.room_number) == room_number
+    ).all()
+    if bookings:
         raise HTTPException(
             status_code=400,
-            detail=f"Room {room_number} cannot be deleted as it is currently {room.status}."
+            detail=f"Room {room_number} cannot be deleted as it is tied to one or more bookings."
         )
 
     # Delete the room if it is available
@@ -336,4 +317,3 @@ def delete_room(
             status_code=500,
             detail=f"An error occurred while deleting the room: {str(e)}"
         )
-

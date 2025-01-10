@@ -3,13 +3,13 @@ from app.users import models, schemas
 from app.rooms import models, schemas
 # Correct imports
 from app.users.models import User  # Correct import for User model
+from app.users import schemas as use_schema
 #from app.rooms.models import Room
-from app.reservations import models, schemas
 #from users.models import User
 
 
 
-def create_user(db: Session, user: schemas.UserSchema, hashed_password: str):
+def create_user(db: Session, user: use_schema.UserSchema, hashed_password: str):
     # Create the new user using the correct User model
     new_user = User(
         username=user.username,
