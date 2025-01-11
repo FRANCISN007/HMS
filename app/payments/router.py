@@ -507,8 +507,11 @@ def void_payment(
     db: Session = Depends(get_db),
     current_user: schemas.UserDisplaySchema = Depends(get_current_user),
 ):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    
     """
-    Mark a payment as void by its ID. This action preserves the payment record for audit purposes.
+        Mark a payment as void by its ID. This action preserves the payment record for audit purposes.
     """
     try:
         # Retrieve the payment record by ID

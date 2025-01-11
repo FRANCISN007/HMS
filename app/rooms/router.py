@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.users.auth import get_current_user
@@ -17,7 +17,8 @@ router = APIRouter()
 # Set up logging
 logger.add("app.log", rotation="500 MB", level="DEBUG")
 
-@router.post("/")
+
+@router.post("/", status_code=status.HTTP_201_CREATED)
 def create_room(
     room: schemas.RoomSchema,
     db: Session = Depends(get_db),
